@@ -105,39 +105,6 @@ def load_movielens(data_path: str = 'MovieLens1M',
             idx = item2idx[movie_id]
             item_content[idx] = genres.loc[movies['movie_id'] == movie_id].values
     
-    # # Load user content (demographics)
-    # users_file = Path(data_path) / 'users.dat'
-    # users = pd.read_csv(
-    #     users_file,
-    #     sep='::',
-    #     names=['user_id', 'gender', 'age', 'occupation', 'zip_code'],
-    #     engine='python'
-    # )
-    
-    # # Process user demographics
-    # # Gender
-    # users['gender'] = (users['gender'] == 'M').astype(int)
-    
-    # # Age groups (one-hot)
-    # age_dummies = pd.get_dummies(users['age'], prefix='age')
-    
-    # # Occupation (one-hot)
-    # occ_dummies = pd.get_dummies(users['occupation'], prefix='occ')
-    
-    # # Combine features
-    # user_features = pd.concat([
-    #     users[['gender']],
-    #     age_dummies,
-    #     occ_dummies
-    # ], axis=1)
-    
-    # # Create user content matrix
-    # user_content = np.zeros((len(user2idx), len(user_features.columns)))
-    # for user_id in users['user_id']:
-    #     if user_id in user2idx:
-    #         idx = user2idx[user_id]
-    #         user_content[idx] = user_features.loc[users['user_id'] == user_id].values
-
     print(f"Dataset loaded: {len(train_data)} train, {len(valid_data)} validation, {len(test_data)} test")
     print(f"Sparsity: {len(ratings)/(len(user2idx)*len(item2idx)):.5f}")
     
