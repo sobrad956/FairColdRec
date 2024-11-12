@@ -11,9 +11,6 @@ from data_loader import MovieLensData
 from matrix_factor import BiasedMF
 
 
-
-
-
 @dataclass
 class HeaterOutput:
     """Container for model outputs"""
@@ -30,13 +27,13 @@ class DenseBatchTanh(nn.Module):
         self.do_norm = do_norm
         self.linear = nn.Linear(in_features, out_features)
         if do_norm:
-            self.batch_norm = nn.BatchNorm1d(out_features, momentum=0.1)  # 1-0.9 from TF
+            self.batch_norm = nn.BatchNorm1d(out_features, momentum=0.1)
         
-        # Initialize weights like TF
-        nn.init.normal_(self.linear.weight, std=0.01)
+        # Initialize weights with careful scaling
+        nn.init.xavier_normal_(self.linear.weight)
         nn.init.zeros_(self.linear.bias)
-    
-    def forward(self, x: torch.Tensor, is_training: bool) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    def forward(self, x: torch.Tensor, is_training: bool) -> tuple[torch.Tensor, torch.Tensor]:
         out = self.linear(x)
         if self.do_norm:
             if is_training:
@@ -46,9 +43,7 @@ class DenseBatchTanh(nn.Module):
             out = self.batch_norm(out)
         out = torch.tanh(out)
         
-        # Calculate L2 regularization
         l2_loss = torch.sum(self.linear.weight ** 2) + torch.sum(self.linear.bias ** 2)
-        
         return out, l2_loss
 
 
@@ -65,17 +60,17 @@ class ContentExpertModule(nn.Module):
             
         self.final = nn.Linear(current_dim, output_dim)
         
-        # Initialize weights
+        # Initialize weights with Xavier initialization
         for layer in self.layers:
-            nn.init.normal_(layer.weight, std=0.01)
+            nn.init.xavier_normal_(layer.weight)
             nn.init.zeros_(layer.bias)
-        nn.init.normal_(self.final.weight, std=0.01)
+        nn.init.xavier_normal_(self.final.weight)
         nn.init.zeros_(self.final.bias)
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         reg_loss = 0
         for layer in self.layers:
-            x = torch.tanh(layer(x))
+            x = F.relu(layer(x))  # Using ReLU instead of tanh for deeper networks
             reg_loss += torch.sum(layer.weight ** 2) + torch.sum(layer.bias ** 2)
         
         x = self.final(x)
@@ -107,6 +102,9 @@ class Heater(nn.Module):
         # Content processing modules
         if self.phi_v_dim > 0:
             self.item_gate = nn.Linear(self.phi_v_dim, dim)
+            nn.init.xavier_normal_(self.item_gate.weight)
+            nn.init.zeros_(self.item_gate.bias)
+            
             self.item_experts = nn.ModuleList([
                 ContentExpertModule(self.phi_v_dim, model_select, self.rank_out)
                 for _ in range(dim)
@@ -114,6 +112,9 @@ class Heater(nn.Module):
             
         if self.phi_u_dim > 0:
             self.user_gate = nn.Linear(self.phi_u_dim, dim)
+            nn.init.xavier_normal_(self.user_gate.weight)
+            nn.init.zeros_(self.user_gate.bias)
+            
             self.user_experts = nn.ModuleList([
                 ContentExpertModule(self.phi_u_dim, model_select, self.rank_out)
                 for _ in range(dim)
@@ -128,16 +129,16 @@ class Heater(nn.Module):
         self.item_embedding = nn.Linear(self.rank_out, self.rank_out)
         
         # Initialize embedding weights
-        nn.init.normal_(self.user_embedding.weight, std=0.01)
+        nn.init.xavier_normal_(self.user_embedding.weight)
         nn.init.zeros_(self.user_embedding.bias)
-        nn.init.normal_(self.item_embedding.weight, std=0.01)
+        nn.init.xavier_normal_(self.item_embedding.weight)
         nn.init.zeros_(self.item_embedding.bias)
 
     def process_content(self, content: torch.Tensor, 
                        gate_layer: nn.Linear,
                        experts: nn.ModuleList) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Gate processing
-        gate = torch.tanh(gate_layer(content))
+        # Gate processing with softmax for proper attention
+        gate = F.softmax(gate_layer(content), dim=1)
         reg_loss = torch.sum(gate_layer.weight ** 2) + torch.sum(gate_layer.bias ** 2)
         
         # Expert processing
@@ -149,9 +150,8 @@ class Heater(nn.Module):
         
         expert_concat = torch.cat(expert_outputs, dim=1)
         
-        # Combine gate and experts
-        output = torch.matmul(gate.unsqueeze(1), expert_concat)
-        output = torch.tanh(output.squeeze(1))
+        # Combine gate and experts with proper broadcasting
+        output = torch.sum(gate.unsqueeze(2) * expert_concat, dim=1)
         
         return output, reg_loss
 
@@ -163,122 +163,134 @@ class Heater(nn.Module):
                 v_content: Optional[torch.Tensor] = None,
                 u_dropout_mask: Optional[torch.Tensor] = None,
                 v_dropout_mask: Optional[torch.Tensor] = None) -> HeaterOutput:
-        reg_loss = 0
+        """Forward pass with proper normalization and scaling"""
+        reg_loss = 0.0
+        
+        # Handle missing dropout masks
+        if u_dropout_mask is None:
+            u_dropout_mask = torch.ones_like(u_in)
+        if v_dropout_mask is None:
+            v_dropout_mask = torch.ones_like(v_in)
         
         # Process item content if available
         if self.phi_v_dim > 0 and v_content is not None:
             v_content_out, v_content_reg = self.process_content(
                 v_content, self.item_gate, self.item_experts)
             reg_loss += v_content_reg
-            
-            # Combine with input embeddings using dropout mask
             v_last = v_in * v_dropout_mask + v_content_out * (1 - v_dropout_mask)
             diff_item_loss = self.alpha * torch.sum(torch.square(v_content_out - v_in))
         else:
             v_last = v_in
             diff_item_loss = 0
-            
+        
         # Process user content if available
         if self.phi_u_dim > 0 and u_content is not None:
             u_content_out, u_content_reg = self.process_content(
                 u_content, self.user_gate, self.user_experts)
             reg_loss += u_content_reg
-            
-            # Combine with input embeddings using dropout mask
             u_last = u_in * u_dropout_mask + u_content_out * (1 - u_dropout_mask)
             diff_user_loss = self.alpha * torch.sum(torch.square(u_content_out - u_in))
         else:
             u_last = u_in
             diff_user_loss = 0
-            
-        # Final transformations
+        
+        # Transform with normalized layers
         u_last, u_reg = self.user_layer(u_last, is_training)
         v_last, v_reg = self.item_layer(v_last, is_training)
         reg_loss += u_reg + v_reg
         
-        # Embedding layers
+        # Apply final embeddings
         u_embedding = self.user_embedding(u_last)
         v_embedding = self.item_embedding(v_last)
         
-        # Add embedding regularization
+        # Normalize embeddings for stable dot product
+        u_norm = F.normalize(u_embedding, p=2, dim=1)
+        v_norm = F.normalize(v_embedding, p=2, dim=1)
+        
+        # Calculate predictions with normalized embeddings and scaling
+        preds = torch.mm(u_norm, v_norm.t())
+        preds = preds * 5.0  # Scale to typical rating range
+        
         reg_loss += (torch.sum(self.user_embedding.weight ** 2) + 
                     torch.sum(self.user_embedding.bias ** 2) +
                     torch.sum(self.item_embedding.weight ** 2) + 
                     torch.sum(self.item_embedding.bias ** 2))
         
-        # Final prediction
-        preds = torch.sum(u_embedding * v_embedding, dim=1)
-        
-        # Scale regularization
         reg_loss *= self.reg
-        
-        # Combine diff losses
         diff_loss = diff_item_loss + diff_user_loss
         
         return HeaterOutput(
             preds=preds,
-            loss_all=None,  # Set in training step
+            loss_all=None,
             loss_diff=diff_loss,
             reg_loss=reg_loss
         )
 
     def train_step(self, 
-                   u_in: torch.Tensor,
-                   v_in: torch.Tensor,
-                   target: torch.Tensor,
-                   optimizer: torch.optim.Optimizer,
-                   u_content: Optional[torch.Tensor] = None,
-                   v_content: Optional[torch.Tensor] = None,
-                   u_dropout_mask: Optional[torch.Tensor] = None,
-                   v_dropout_mask: Optional[torch.Tensor] = None) -> HeaterOutput:
-        """Single training step"""
+                u_in: torch.Tensor,
+                v_in: torch.Tensor,
+                target: torch.Tensor,
+                optimizer: torch.optim.Optimizer,
+                u_content: Optional[torch.Tensor] = None,
+                v_content: Optional[torch.Tensor] = None,
+                u_dropout_mask: Optional[torch.Tensor] = None,
+                v_dropout_mask: Optional[torch.Tensor] = None) -> HeaterOutput:
+        """Single training step with improved loss calculation"""
         self.train()
         optimizer.zero_grad()
         
         # Forward pass
         output = self(u_in, v_in, True, u_content, v_content, 
-                     u_dropout_mask, v_dropout_mask)
+                    u_dropout_mask, v_dropout_mask)
         
-        # Calculate MSE loss
-        mse_loss = F.mse_loss(output.preds, target)
+        # Get predictions for actual items
+        preds = torch.diagonal(output.preds)
         
-        # Total loss
-        total_loss = mse_loss + output.reg_loss + output.loss_diff
+        # Calculate MSE loss with proper scaling
+        mse_loss = F.mse_loss(preds, target)
+        
+        # Total loss with weighted components
+        total_loss = mse_loss + output.reg_loss
+        if output.loss_diff is not None:
+            total_loss = total_loss + output.loss_diff
+        
         output.loss_all = total_loss
         
-        # Backward pass
+        # Backward pass with gradient clipping
         total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
         optimizer.step()
         
         return output
 
     def get_recommendations(self, 
-                           u_in: torch.Tensor,
-                           v_in: torch.Tensor,
-                           k: int,
-                           train_mat: Optional[torch.sparse.Tensor] = None,
-                           u_content: Optional[torch.Tensor] = None,
-                           v_content: Optional[torch.Tensor] = None,
-                           u_dropout_mask: Optional[torch.Tensor] = None,
-                           v_dropout_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Get top-k recommendations"""
+                        u_in: torch.Tensor,
+                        v_in: torch.Tensor,
+                        k: int,
+                        train_mat: Optional[torch.sparse.Tensor] = None,
+                        u_content: Optional[torch.Tensor] = None,
+                        v_content: Optional[torch.Tensor] = None,
+                        u_dropout_mask: Optional[torch.Tensor] = None,
+                        v_dropout_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Get top-k recommendations with proper handling of seen items"""
         self.eval()
         with torch.no_grad():
             output = self(u_in, v_in, False, u_content, v_content,
-                         u_dropout_mask, v_dropout_mask)
+                        u_dropout_mask, v_dropout_mask)
             scores = output.preds
             
-            # Add training matrix if provided (warm start)
+            # Optionally mask out training items
             if train_mat is not None:
-                scores = scores + train_mat
+                scores = scores - 1e9 * train_mat.to_dense()
             
             # Get top-k items
-            _, indices = torch.topk(scores, k, dim=1)
+            _, indices = torch.topk(scores, k)
             
         return indices
 
+
 class HeaterDataset(Dataset):
-    """Dataset for Heater training"""
+    """Dataset for Heater training with improved data handling"""
     def __init__(self, 
                  base_model_embeddings: Tuple[np.ndarray, np.ndarray],
                  ratings: pd.DataFrame,
@@ -299,42 +311,63 @@ class HeaterDataset(Dataset):
         item_idx = self.items[idx]
         
         # Get base model embeddings
-        user_emb = self.user_emb[user_idx]
-        item_emb = self.item_emb[item_idx]
+        user_emb = self.user_emb[user_idx].astype(np.float32)
+        item_emb = self.item_emb[item_idx].astype(np.float32)
         
-        # Create dropout masks (1 = keep base embedding, 0 = use content)
-        user_mask = np.random.binomial(1, 0.5)  # 50% dropout rate
+        # Create dropout masks
+        user_mask = np.random.binomial(1, 0.5)
         item_mask = np.random.binomial(1, 0.5)
         
+        # Get rating and normalize to [0, 1]
+        rating = self.ratings[idx] / 5.0
+        
         output = [
-            torch.tensor(user_emb, dtype=torch.float),
-            torch.tensor(item_emb, dtype=torch.float),
-            torch.tensor(self.ratings[idx], dtype=torch.float),
-            torch.tensor(user_mask, dtype=torch.float),
-            torch.tensor(item_mask, dtype=torch.float)
+            torch.from_numpy(user_emb),
+            torch.from_numpy(item_emb),
+            torch.tensor(rating, dtype=torch.float32),
+            torch.tensor(user_mask, dtype=torch.float32),
+            torch.tensor(item_mask, dtype=torch.float32)
         ]
         
         # Add content features if available
         if self.user_content is not None:
-            output.append(torch.tensor(self.user_content[user_idx], dtype=torch.float))
+            user_content = self.user_content[user_idx].astype(np.float32)
+            output.append(torch.from_numpy(user_content))
         if self.item_content is not None:
-            output.append(torch.tensor(self.item_content[item_idx], dtype=torch.float))
+            item_content = self.item_content[item_idx].astype(np.float32)
+            output.append(torch.from_numpy(item_content))
             
         return tuple(output)
-
-
+    
 def train_heater(ml_data: MovieLensData,
                  base_model: BiasedMF,
                  batch_size: int = 1024,
                  num_epochs: int = 50,
                  device: str = 'cuda' if torch.cuda.is_available() else 'cpu') -> Heater:
-    """Train Heater model using base model embeddings and content"""
-    # Get base model embeddings and convert to float32
+    """Train Heater model with corrected loss handling"""
+    # Get base model embeddings
     user_emb, item_emb = base_model.get_embeddings()
     base_embeddings = (user_emb.float().cpu().numpy(), 
                       item_emb.float().cpu().numpy())
     
-    # Create Heater dataset
+    # Create Heater model
+    heater = Heater(
+        latent_rank_in=base_embeddings[0].shape[1],
+        user_content_rank=ml_data.user_content.shape[1] if ml_data.user_content is not None else 0,
+        item_content_rank=ml_data.item_content.shape[1] if ml_data.item_content is not None else 0,
+        model_select=[100, 50],
+        rank_out=base_embeddings[0].shape[1],
+        reg=0.0001,
+        alpha=1.0,
+        dim=8
+    ).to(device)
+    
+    optimizer = torch.optim.AdamW(heater.parameters(), lr=0.001, weight_decay=0.01)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=5, T_mult=2, eta_min=1e-6
+    )
+    
+    # Create dataset and loader
     heater_train_dataset = HeaterDataset(
         base_embeddings,
         ml_data.train_data,
@@ -350,29 +383,25 @@ def train_heater(ml_data: MovieLensData,
         pin_memory=True
     )
     
-    # Initialize Heater model
-    heater = Heater(
-        latent_rank_in=base_embeddings[0].shape[1],
-        user_content_rank=ml_data.user_content.shape[1] if ml_data.user_content is not None else 0,
-        item_content_rank=ml_data.item_content.shape[1] if ml_data.item_content is not None else 0,
-        model_select=[100, 50],
-        rank_out=base_embeddings[0].shape[1],
-        reg=0.0001,
-        alpha=4.0,
-        dim=8
-    ).to(device)
-    
-    # Initialize optimizer
-    optimizer = torch.optim.Adam(heater.parameters(), lr=0.001)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
-    
     # Training loop
+    best_loss = float('inf')
+    patience = 5
+    patience_counter = 0
+    best_model_state = None
+    
+    print("Starting HEATER training...")
+    print(f"Training data size: {len(ml_data.train_data)}")
+    print(f"Batch size: {batch_size}")
+    print(f"Number of epochs: {num_epochs}")
+    print(f"Device: {device}")
+    
     for epoch in range(num_epochs):
+        heater.train()
         total_loss = 0
         num_batches = 0
         
-        for batch in heater_train_loader:
-            # Unpack batch and ensure float32
+        for batch_idx, batch in enumerate(heater_train_loader):
+            # Unpack and prepare batch data
             u_emb, i_emb, ratings = [x.float() for x in batch[:3]]
             u_mask, i_mask = [x.float() for x in batch[3:5]]
             u_content = batch[5].float() if len(batch) > 5 else None
@@ -398,23 +427,68 @@ def train_heater(ml_data: MovieLensData,
                 v_dropout_mask=i_mask.unsqueeze(1)
             )
             
-            total_loss += output.loss_all.item()
+            # Only track total loss, which already includes all components
+            if output.loss_all is not None:
+                total_loss += output.loss_all.item()
+            
             num_batches += 1
+            
+            # Print progress every 100 batches
+            if batch_idx % 100 == 0:
+                current_loss = output.loss_all.item() if output.loss_all is not None else 0
+                print(f"Epoch {epoch+1}/{num_epochs} - Batch {batch_idx}/{len(heater_train_loader)} - "
+                      f"Current Loss: {current_loss:.4f}")
         
+        # Calculate average loss
+        avg_loss = total_loss / num_batches if num_batches > 0 else float('inf')
+        
+        # Step the scheduler
         scheduler.step()
-        avg_loss = total_loss / num_batches
-        if (epoch + 1) % 5 == 0:
-            print(f'Epoch {epoch+1}/{num_epochs} - Avg Loss: {avg_loss:.4f}')
+        
+        # Print epoch statistics
+        print(f"\nEpoch {epoch+1}/{num_epochs} Summary:")
+        print(f"Average Loss: {avg_loss:.4f}")
+        print(f"Learning Rate: {scheduler.get_last_lr()[0]:.6f}")
+        
+        # Early stopping check
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            patience_counter = 0
+            best_model_state = {k: v.cpu() for k, v in heater.state_dict().items()}
+            print("New best model saved!")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"\nEarly stopping triggered after epoch {epoch+1}")
+                break
+        
+        # Save checkpoint every 10 epochs
+        if (epoch + 1) % 10 == 0:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': heater.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_loss,
+            }
+            torch.save(checkpoint, f'heater_checkpoint_epoch_{epoch+1}.pt')
+    
+    # Load best model state
+    if best_model_state is not None:
+        heater.load_state_dict(best_model_state)
+        print("\nLoaded best model state from training")
+    
+    print("\nTraining completed!")
+    print(f"Best loss achieved: {best_loss:.4f}")
     
     return heater
 
 
 def save_heater_embeddings(heater: Heater,
-                          ml_data: MovieLensData,
-                          base_model: BiasedMF,
-                          save_path: str,
-                          device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
-    """Save embeddings from trained Heater model"""
+                        ml_data: MovieLensData,
+                        base_model: BiasedMF,
+                        save_path: str,
+                        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
+    """Save embeddings from trained Heater model with improved handling"""
     heater.eval()
     
     # Convert save_path to Path object and create directory
@@ -424,41 +498,27 @@ def save_heater_embeddings(heater: Heater,
     with torch.no_grad():
         # Get base embeddings and ensure float32
         user_emb, item_emb = base_model.get_embeddings()
-        user_emb = user_emb.float()  # Convert from double to float
-        item_emb = item_emb.float()  # Convert from double to float
+        user_emb = user_emb.float()
+        item_emb = item_emb.float()
         
-        # Process all users
+        print("Processing user embeddings...")
+        # Process users in batches
         user_embeddings = []
         batch_size = 1024
-        
-        # Create dummy tensors in float32
-        dummy_item = torch.zeros_like(item_emb[0:1]).float().repeat(batch_size, 1).to(device)
-        if ml_data.item_content is not None:
-            dummy_item_content = torch.zeros(
-                (batch_size, ml_data.item_content.shape[1]), 
-                dtype=torch.float32
-            ).to(device)
-        else:
-            dummy_item_content = None
+        num_user_batches = (len(user_emb) + batch_size - 1) // batch_size
         
         for i in range(0, len(user_emb), batch_size):
             batch_u = user_emb[i:i+batch_size].to(device)
-            curr_batch_size = len(batch_u)
             
-            if curr_batch_size < batch_size:  # Handle last batch
-                dummy_item = dummy_item[:curr_batch_size]
-                if dummy_item_content is not None:
-                    dummy_item_content = dummy_item_content[:curr_batch_size]
-                
             if ml_data.user_content is not None:
                 batch_uc = torch.tensor(
-                    ml_data.user_content[i:i+curr_batch_size], 
+                    ml_data.user_content[i:i+len(batch_u)], 
                     dtype=torch.float32
                 ).to(device)
             else:
                 batch_uc = None
             
-            # Use the Heater's user transformation components
+            # Transform user embeddings
             if heater.phi_u_dim > 0 and batch_uc is not None:
                 u_content_out, _ = heater.process_content(
                     batch_uc, heater.user_gate, heater.user_experts)
@@ -469,39 +529,27 @@ def save_heater_embeddings(heater: Heater,
             u_transformed, _ = heater.user_layer(u_transformed, False)
             u_out = heater.user_embedding(u_transformed)
             user_embeddings.append(u_out.cpu())
+            
+            if (i // batch_size) % 10 == 0:
+                print(f"Processed user batch {i//batch_size + 1}/{num_user_batches}")
         
-        user_embeddings = torch.cat(user_embeddings, dim=0).numpy()
-        
-        # Process all items
+        print("\nProcessing item embeddings...")
+        # Process items in batches
         item_embeddings = []
-        # Create dummy user tensors in float32
-        dummy_user = torch.zeros_like(user_emb[0:1]).float().repeat(batch_size, 1).to(device)
-        if ml_data.user_content is not None:
-            dummy_user_content = torch.zeros(
-                (batch_size, ml_data.user_content.shape[1]), 
-                dtype=torch.float32
-            ).to(device)
-        else:
-            dummy_user_content = None
+        num_item_batches = (len(item_emb) + batch_size - 1) // batch_size
         
         for i in range(0, len(item_emb), batch_size):
             batch_i = item_emb[i:i+batch_size].to(device)
-            curr_batch_size = len(batch_i)
             
-            if curr_batch_size < batch_size:  # Handle last batch
-                dummy_user = dummy_user[:curr_batch_size]
-                if dummy_user_content is not None:
-                    dummy_user_content = dummy_user_content[:curr_batch_size]
-                
             if ml_data.item_content is not None:
                 batch_ic = torch.tensor(
-                    ml_data.item_content[i:i+curr_batch_size], 
+                    ml_data.item_content[i:i+len(batch_i)], 
                     dtype=torch.float32
                 ).to(device)
             else:
                 batch_ic = None
             
-            # Use the Heater's item transformation components
+            # Transform item embeddings
             if heater.phi_v_dim > 0 and batch_ic is not None:
                 i_content_out, _ = heater.process_content(
                     batch_ic, heater.item_gate, heater.item_experts)
@@ -512,10 +560,17 @@ def save_heater_embeddings(heater: Heater,
             i_transformed, _ = heater.item_layer(i_transformed, False)
             i_out = heater.item_embedding(i_transformed)
             item_embeddings.append(i_out.cpu())
+            
+            if (i // batch_size) % 10 == 0:
+                print(f"Processed item batch {i//batch_size + 1}/{num_item_batches}")
         
+        # Concatenate and convert to numpy
+        user_embeddings = torch.cat(user_embeddings, dim=0).numpy()
         item_embeddings = torch.cat(item_embeddings, dim=0).numpy()
         
         # Save embeddings
         np.save(save_dir / 'U_emb_Heater.npy', user_embeddings)
         np.save(save_dir / 'I_emb_Heater.npy', item_embeddings)
-        print(f"Saved embeddings to {save_dir}")
+        print(f"\nSuccessfully saved embeddings to {save_dir}")
+    
+    
