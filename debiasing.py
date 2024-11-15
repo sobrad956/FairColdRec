@@ -6,10 +6,10 @@ import torch.nn.functional as F
 import numpy as np
 from typing import List, Optional, Union, Dict
 from dataclasses import dataclass
-from collections import defaultdict
 from data_loader import MovieLensData
 from matrix_factor import BiasedMF
-from heater import Heater
+#from heater import Heater
+from dropoutnet import DeepCF
 
 @dataclass
 class ModelOutput:
@@ -141,7 +141,7 @@ def preprocess_ratings(R: torch.Tensor,
                       mask: torch.Tensor,
                       item_warm: np.ndarray,
                       alpha: float) -> torch.Tensor:
-    """Preprocess ratings with fixed dimensionality issues"""
+    """Preprocess ratings"""
     # Print shapes for debugging
     print(f"R shape: {R.shape}")
     print(f"mask shape: {mask.shape}")
@@ -203,7 +203,7 @@ def preprocess_ratings(R: torch.Tensor,
     
     return R_output
 
-def train_debiasing_model(base_model: Union[BiasedMF, Heater],
+def train_debiasing_model(base_model: Union[BiasedMF, DeepCF],
                          ml_data: MovieLensData,
                          model_select: List[int] = [100],
                          alpha: float = 4.0,
@@ -221,14 +221,25 @@ def train_debiasing_model(base_model: Union[BiasedMF, Heater],
         if isinstance(base_model, BiasedMF):
             u_emb, i_emb = base_model.get_embeddings()
             R = torch.mm(i_emb, u_emb.t())
+        elif isinstance(base_model, DeepCF):
+            # For DropoutNet, use the encoded embeddings
+            # Create dummy inputs to get embeddings
+            u_dummy = torch.zeros((ml_data.n_users, base_model.rank_in)).to(device)
+            i_dummy = torch.zeros((ml_data.n_items, base_model.rank_in)).to(device)
+            
+            u_content = (torch.tensor(ml_data.user_content.todense(), dtype=torch.float32).to(device) 
+                        if ml_data.user_content is not None else None)
+            #i_content = (torch.tensor(ml_data.item_content.todense(), dtype=torch.float32).to(device)
+            i_content = (torch.tensor(ml_data.item_content, dtype=torch.float32).to(device)  
+                        if ml_data.item_content is not None else None)
+            
+            # Get encoded embeddings
+            u_emb, i_emb = base_model.encode(u_dummy, i_dummy, u_content, i_content)
+            # Calculate rating matrix
+            R = torch.mm(i_emb, u_emb.t())
         else:  # Heater
-            # Get the embeddings after HEATER transformation
             u_emb = base_model.user_embedding.weight.detach()
             i_emb = base_model.item_embedding.weight.detach()
-            
-            # Print embedding dimensions
-            print(f"User embedding shape: {u_emb.shape}")
-            print(f"Item embedding shape: {i_emb.shape}")
             
             # Normalize embeddings if they're from HEATER
             u_norm = F.normalize(u_emb, p=2, dim=1)
@@ -236,7 +247,8 @@ def train_debiasing_model(base_model: Union[BiasedMF, Heater],
             
             # Calculate rating matrix
             R = torch.mm(i_norm, u_norm.t()) * 5.0  # Scale back to rating range
-            print(f"Generated rating matrix shape: {R.shape}")
+        
+        print(f"Generated rating matrix shape: {R.shape}")
     
     # Create mask matrix with proper dimensions
     mask = torch.zeros((R.shape[0], R.shape[1]), device=device)
@@ -252,10 +264,6 @@ def train_debiasing_model(base_model: Union[BiasedMF, Heater],
             mask[item_idx, user_idx] = 1
             valid_entries += 1
     print(f"Filled mask matrix with {valid_entries} valid entries")
-    
-    # Move tensors to device
-    R = R.to(device)
-    mask = mask.to(device)
     
     # Get warm items (items with training data)
     item_warm = ml_data.train_data['item_idx'].unique()
@@ -275,7 +283,7 @@ def train_debiasing_model(base_model: Union[BiasedMF, Heater],
     print("Initializing debiasing model...")
     debiasing_model = DebiasingModel(
         model_select=model_select,
-        num_user=R.shape[1],  # Use actual matrix dimensions
+        num_user=R.shape[1],
         num_item=R.shape[0],
         reg=reg
     ).to(device)
