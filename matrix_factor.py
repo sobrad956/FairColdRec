@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 from typing import Optional
 from dataclasses import dataclass
+import numpy as np
+
+#local
+from evaluator import ndcg_calc_base
 
 
 @dataclass
@@ -14,20 +18,20 @@ class MFOutput:
 
 class BiasedMF(nn.Module):
     def __init__(self, 
-                 num_users: int,
-                 num_items: int,
-                 embedding_dim: int = 100,
-                 reg: float = 0.0001):
+                 num_users,
+                 num_items,
+                 embedding_dim = 100,
+                 reg = 0.0001):
         super().__init__()
         self.reg = reg
         
         # User components
-        self.user_embeddings = nn.Embedding(num_users, embedding_dim)
-        self.user_bias = nn.Embedding(num_users, 1)
+        self.user_embeddings = nn.Embedding(num_users, embedding_dim, sparse=True)
+        self.user_bias = nn.Embedding(num_users, 1, sparse=True)
         
         # Item components
-        self.item_embeddings = nn.Embedding(num_items, embedding_dim)
-        self.item_bias = nn.Embedding(num_items, 1)
+        self.item_embeddings = nn.Embedding(num_items, embedding_dim, sparse=True)
+        self.item_bias = nn.Embedding(num_items, 1, sparse=True)
         
         # Global bias
         self.global_bias = nn.Parameter(torch.zeros(1))
@@ -39,8 +43,8 @@ class BiasedMF(nn.Module):
         nn.init.zeros_(self.item_bias.weight)
 
     def forward(self,
-                user_ids: torch.Tensor,
-                item_ids: torch.Tensor) -> MFOutput:
+                user_ids,
+                item_ids):
         """
         Forward pass of the model
         
@@ -75,10 +79,10 @@ class BiasedMF(nn.Module):
         return MFOutput(preds=preds, reg_loss=reg_loss)
 
     def train_step(self,
-                   user_ids: torch.Tensor,
-                   item_ids: torch.Tensor,
-                   ratings: torch.Tensor,
-                   optimizer: torch.optim.Optimizer) -> MFOutput:
+                   user_ids,
+                   item_ids,
+                   ratings,
+                   optimizer):
         """Single training step"""
         self.train()
         optimizer.zero_grad()
@@ -99,7 +103,7 @@ class BiasedMF(nn.Module):
         
         return output
     
-    def get_embeddings(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_embeddings(self):
         """Get user and item embeddings"""
         return (
             self.user_embeddings.weight.detach(),
@@ -107,17 +111,21 @@ class BiasedMF(nn.Module):
         )
 
 
-def train_mf(model: BiasedMF,
-             train_loader: torch.utils.data.DataLoader,
-             num_epochs: int = 20,
-             lr: float = 0.005,
-             device: str = 'cuda' if torch.cuda.is_available() else 'cpu') -> BiasedMF:
+def train_mf(model,
+             train_loader,
+             val_loader,
+             ml_data,
+             num_epochs = 20,
+             lr = 0.005,
+             device = 'cuda' if torch.cuda.is_available() else 'cpu'):
     """
     Train the MF model
     
     Args:
         model: BiasedMF model
         train_loader: DataLoader for training data
+        val_loader: DataLoader for validation data,
+        ml_data: Movie lens data object
         num_epochs: Number of training epochs
         lr: Learning rate
         device: Device to train on
@@ -126,13 +134,18 @@ def train_mf(model: BiasedMF,
         Trained model
     """
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+    train_losses = []
+    ndcg_scores = []
+    ndcg_test_scores = []
     
     for epoch in range(num_epochs):
+        model.train()
         total_loss = 0
         num_batches = 0
         
         for user_ids, item_ids, ratings in train_loader:
+            optimizer.zero_grad()
             # Move to device
             user_ids = user_ids.to(device)
             item_ids = item_ids.to(device)
@@ -142,9 +155,20 @@ def train_mf(model: BiasedMF,
             output = model.train_step(user_ids, item_ids, ratings, optimizer)
             total_loss += output.loss.item()
             num_batches += 1
+            
+        #Calc NDCG on training set (monitor along with loss for sanity)
+        train_ndcg, train_prec, train_rec = ndcg_calc_base(model, train_loader, ml_data, k_values=[15,30], device=device)
+        ndcg_scores.append(np.mean(train_ndcg))
+        
+        #Comment this out to speed up, leaving it to check now
+        test_ndcg, test_prec, test_rec = ndcg_calc_base(model, val_loader, ml_data, [15,30], device= device)
+        ndcg_test_scores.append(np.mean(test_ndcg))
+        
+        avg_loss = total_loss / len(train_loader)
+        train_losses.append(avg_loss)
         
         avg_loss = total_loss / num_batches
-        if (epoch + 1) % 5 == 0:
-            print(f'Epoch {epoch+1}/{num_epochs} - Avg Loss: {avg_loss:.4f}')
+        print(f"Epoch {epoch+1} - Avg Loss: {avg_loss:.4f} - Avg Train NDCG: {np.mean(train_ndcg):.4f} - Avg Test NDCG: {np.mean(test_ndcg):.4f}")
+        print(f"Epoch {epoch+1} - Train Precision: {np.mean(train_prec):.4f} - Train Recall: {np.mean(train_rec):.4f} - Avg Test Prec: {np.mean(test_prec):.4f} - Avg Tet Rec: {np.mean(test_rec)}")
             
     return model
