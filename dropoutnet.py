@@ -7,14 +7,16 @@ from torch.optim.lr_scheduler import StepLR
 import scipy
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
-from typing import Dict, Optional, Tuple, List
+from typing import Optional
 from dataclasses import dataclass
 
 from matrix_factor import BiasedMF
 from data_loader import MovieLensData
+from evaluator import ndcg_calc_dropout, ndcg_calc_dropout_sampled
 
 
 def truncated_normal_(tensor, mean=0, std=1):
@@ -221,10 +223,10 @@ class DropoutNetOutput:
 class DropoutNetDataset(Dataset):
     """Dataset for DropoutNet training"""
     def __init__(self, 
-                base_model_embeddings: Tuple[torch.Tensor, torch.Tensor],
-                ratings: pd.DataFrame,
-                user_content: Optional[np.ndarray] = None,
-                item_content: Optional[np.ndarray] = None):
+                base_model_embeddings,
+                ratings,
+                user_content = None,
+                item_content = None):
         self.user_emb, self.item_emb = base_model_embeddings
         self.users = ratings['user_idx'].values
         self.items = ratings['item_idx'].values
@@ -232,10 +234,10 @@ class DropoutNetDataset(Dataset):
         self.user_content = user_content
         self.item_content = item_content
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.ratings)
 
-    def __getitem__(self, idx: int) -> tuple:
+    def __getitem__(self):
         user_idx = self.users[idx]
         item_idx = self.items[idx]
         
@@ -258,20 +260,207 @@ class DropoutNetDataset(Dataset):
             
         return tuple(output)
 
-def train_dropoutnet(ml_data: MovieLensData,
-                     base_model: BiasedMF,
-                     model_select: List[int] = [800, 400],
-                     rank_out: int = 200,
-                     dropout_rate: float = 0.5,
-                     batch_size: int = 1000,
-                     n_scores_per_user: int = 2500,
-                     data_batch_size: int = 100,
-                     max_data_per_step: int = 2500000,
-                     num_epochs: int = 10,
-                     learning_rate: float = 0.005,
-                     device: str = 'cuda' if torch.cuda.is_available() else 'cpu') -> DeepCF:
+# def train_dropoutnet(ml_data: MovieLensData,
+#                      base_model: BiasedMF,
+#                      val_loader,
+#                      model_select: List[int] = [800, 400],
+#                      rank_out: int = 200,
+#                      dropout_rate: float = 0.5,
+#                      batch_size: int = 1000,
+#                      n_scores_per_user: int = 2500,
+#                      data_batch_size: int = 100,
+#                      max_data_per_step: int = 2500000,
+#                      num_epochs: int = 10,
+#                      learning_rate: float = 0.005,
+#                      device: str = 'cuda' if torch.cuda.is_available() else 'cpu') -> DeepCF:
+#     """
+#     Train DropoutNet model for recommendation
+    
+#     Args:
+#         ml_data: MovieLens data container
+#         base_model: Trained BiasedMF model
+#         model_select: Hidden layer dimensions
+#         rank_out: Output embedding dimension
+#         dropout_rate: Dropout probability
+#         batch_size: User batch size
+#         n_scores_per_user: Number of items to score per user
+#         data_batch_size: Size of training batches
+#         max_data_per_step: Maximum training examples per step
+#         num_epochs: Number of training epochs
+#         learning_rate: Initial learning rate
+#         device: Computing device
+        
+#     Returns:
+#         Trained DropoutNet model
+#     """
+#     print("Initializing DropoutNet training...")
+    
+#     # Get base embeddings
+#     with torch.no_grad():
+#         u_emb, i_emb = base_model.get_embeddings()
+#         u_emb = u_emb.float()
+#         i_emb = i_emb.float()
+        
+#         # Create expanded embeddings for dropout
+#         u_emb_expanded = torch.cat([u_emb, torch.zeros(1, u_emb.shape[1])], dim=0)
+#         i_emb_expanded = torch.cat([i_emb, torch.zeros(1, i_emb.shape[1])], dim=0)
+#         u_last_idx = u_emb.shape[0]
+#         i_last_idx = i_emb.shape[0]
+    
+#     # Initialize model
+#     model = get_model(
+#         latent_rank_in=u_emb.shape[1],
+#         user_content_rank=ml_data.user_content.shape[1] if ml_data.user_content is not None else 0,
+#         item_content_rank=ml_data.item_content.shape[1] if ml_data.item_content is not None else 0,
+#         model_select=model_select,
+#         rank_out=rank_out
+#     ).to(device)
+    
+#     # Initialize optimizer and loss
+#     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+#     scheduler = StepLR(optimizer, step_size=5, gamma=0.9)
+#     criterion = nn.MSELoss()
+    
+#     # Get all user indices
+#     user_indices = ml_data.train_data['user_idx'].unique()
+    
+#     print(f"Starting training for {num_epochs} epochs...")
+#     model.train()
+#     total_steps = 0
+    
+#     for epoch in range(num_epochs):
+#         np.random.shuffle(user_indices)
+#         epoch_loss = 0
+#         num_batches = 0
+        
+#         # Process users in batches
+#         for user_batch_start in range(0, len(user_indices), batch_size):
+#             user_batch = user_indices[user_batch_start:user_batch_start + batch_size]
+            
+#             # Generate targets for the batch
+#             target_users = np.repeat(user_batch, n_scores_per_user)
+#             target_users_rand = np.repeat(np.arange(len(user_batch)), n_scores_per_user)
+            
+#             # Get random items for each user
+#             target_items_rand = [np.random.choice(i_emb.shape[0], n_scores_per_user) 
+#                                for _ in user_batch]
+#             target_items_rand = np.array(target_items_rand).flatten()
+            
+#             # Calculate preference scores
+#             with torch.no_grad():
+#                 batch_u_emb = u_emb[user_batch].to(device)
+#                 preds_pref = torch.mm(batch_u_emb, i_emb.t().to(device))
+#                 target_scores, target_items = torch.topk(preds_pref, k=n_scores_per_user)
+                
+#                 target_items = target_items.cpu().numpy()
+#                 target_scores = target_scores.cpu().numpy()
+#                 random_scores = preds_pref.cpu().numpy()[target_users_rand, target_items_rand]
+            
+#             # Combine top-N and random-N items
+#             target_scores = np.concatenate([target_scores.flatten(), random_scores])
+#             target_items = np.concatenate([target_items.flatten(), target_items_rand])
+#             target_users = np.concatenate([target_users, target_users])
+            
+#             # Shuffle and limit data per step
+#             n_targets = len(target_scores)
+#             perm = np.random.permutation(n_targets)
+#             n_targets = min(n_targets, max_data_per_step)
+            
+#             # Process in smaller batches
+#             for batch_start in range(0, n_targets, data_batch_size):
+#                 batch_end = min(batch_start + data_batch_size, n_targets)
+#                 batch_perm = perm[batch_start:batch_end]
+                
+#                 batch_users = target_users[batch_perm]
+#                 batch_items = target_items[batch_perm]
+                
+#                 # Apply dropout
+#                 if dropout_rate > 0:
+#                     n_to_drop = int(np.floor(dropout_rate * len(batch_perm)))
+#                     drop_user_idx = np.random.permutation(len(batch_perm))[:n_to_drop]
+#                     drop_item_idx = np.random.permutation(len(batch_perm))[:n_to_drop]
+                    
+#                     batch_u_idx = np.copy(batch_users)
+#                     batch_i_idx = np.copy(batch_items)
+                    
+#                     batch_u_idx[drop_item_idx] = u_last_idx
+#                     batch_i_idx[drop_user_idx] = i_last_idx
+#                 else:
+#                     batch_u_idx = batch_users
+#                     batch_i_idx = batch_items
+                
+#                 # Prepare inputs
+#                 Uin = torch.tensor(u_emb_expanded[batch_u_idx], device=device)
+#                 Vin = torch.tensor(i_emb_expanded[batch_i_idx], device=device)
+                
+#                 if ml_data.user_content is not None:
+#                     Ucontent = torch.tensor(
+#                         #ml_data.user_content[batch_users].todense(), 
+#                         ml_data.user_content[batch_users],
+#                         dtype=torch.float32,
+#                         device=device
+#                     )
+#                 else:
+#                     Ucontent = None
+                    
+#                 if ml_data.item_content is not None:
+#                     Vcontent = torch.tensor(
+#                         #ml_data.item_content[batch_items].todense(),
+#                         ml_data.item_content[batch_items],  
+#                         dtype=torch.float32,
+#                         device=device
+#                     )
+#                 else:
+#                     Vcontent = None
+                
+#                 targets = torch.tensor(target_scores[batch_perm], device=device)
+                
+#                 # Forward pass
+#                 preds, _, _ = model(Uin, Vin, Ucontent, Vcontent)
+#                 loss = criterion(preds, targets)
+                
+#                 # Backward pass
+#                 optimizer.zero_grad()
+#                 loss.backward()
+#                 optimizer.step()
+                
+#                 epoch_loss += loss.item()
+#                 num_batches += 1
+#                 total_steps += 1
+                
+#                 if total_steps % 100 == 0:
+#                     print(f"Step {total_steps}: Loss = {loss.item():.4f}")
+        
+#         # Step the scheduler after each epoch
+#         scheduler.step()
+        
+#         if epoch % 5 == 0:
+#             validation_ndcg = ndcg_calc_dropout(base_model, model, val_loader, ml_data)
+#             print(f"Validation NDCG@10: {validation_ndcg[0]:.4f}")
+        
+#         avg_epoch_loss = epoch_loss / max(num_batches, 1)
+#         print(f"Epoch {epoch+1}/{num_epochs}: Average Loss = {avg_epoch_loss:.4f}")
+    
+#     print("Training completed!")
+#     return model
+def train_dropoutnet(ml_data,
+                    base_model,
+                    model_select = [800, 400],
+                    rank_out = 200,
+                    dropout_rate = 0.5,
+                    batch_size = 1000,
+                    n_scores_per_user = 2500,
+                    data_batch_size = 100,
+                    max_data_per_step = 2500000,
+                    num_epochs = 50,
+                    learning_rate = 0.001,
+                    eval_every = 5,
+                    patience = 5,
+                    val_loader = None,
+                    test_loader = None,
+                    device = 'cuda' if torch.cuda.is_available() else 'cpu'):
     """
-    Train DropoutNet model for recommendation
+    Train DropoutNet model with proper validation
     
     Args:
         ml_data: MovieLens data container
@@ -285,6 +474,10 @@ def train_dropoutnet(ml_data: MovieLensData,
         max_data_per_step: Maximum training examples per step
         num_epochs: Number of training epochs
         learning_rate: Initial learning rate
+        eval_every: Evaluate every N epochs
+        patience: Early stopping patience
+        val_loader: Validation data loader
+        test_loader: Test data loader
         device: Computing device
         
     Returns:
@@ -321,6 +514,14 @@ def train_dropoutnet(ml_data: MovieLensData,
     # Get all user indices
     user_indices = ml_data.train_data['user_idx'].unique()
     
+    # Training tracking variables
+    best_val_ndcg = -float('inf')
+    best_model_state = None
+    patience_counter = 0
+    train_losses = []
+    val_ndcgs = []
+    test_ndcgs = []
+    
     print(f"Starting training for {num_epochs} epochs...")
     model.train()
     total_steps = 0
@@ -353,17 +554,16 @@ def train_dropoutnet(ml_data: MovieLensData,
                 target_scores = target_scores.cpu().numpy()
                 random_scores = preds_pref.cpu().numpy()[target_users_rand, target_items_rand]
             
-            # Combine top-N and random-N items
+            # Combine and process training data
             target_scores = np.concatenate([target_scores.flatten(), random_scores])
             target_items = np.concatenate([target_items.flatten(), target_items_rand])
             target_users = np.concatenate([target_users, target_users])
             
-            # Shuffle and limit data per step
             n_targets = len(target_scores)
             perm = np.random.permutation(n_targets)
             n_targets = min(n_targets, max_data_per_step)
             
-            # Process in smaller batches
+            # Training mini-batches
             for batch_start in range(0, n_targets, data_batch_size):
                 batch_end = min(batch_start + data_batch_size, n_targets)
                 batch_perm = perm[batch_start:batch_end]
@@ -390,52 +590,84 @@ def train_dropoutnet(ml_data: MovieLensData,
                 Uin = torch.tensor(u_emb_expanded[batch_u_idx], device=device)
                 Vin = torch.tensor(i_emb_expanded[batch_i_idx], device=device)
                 
+                Ucontent = None
+                Vcontent = None
                 if ml_data.user_content is not None:
                     Ucontent = torch.tensor(
-                        #ml_data.user_content[batch_users].todense(), 
                         ml_data.user_content[batch_users],
                         dtype=torch.float32,
                         device=device
                     )
-                else:
-                    Ucontent = None
-                    
                 if ml_data.item_content is not None:
                     Vcontent = torch.tensor(
-                        #ml_data.item_content[batch_items].todense(),
-                        ml_data.item_content[batch_items],  
+                        ml_data.item_content[batch_items],
                         dtype=torch.float32,
                         device=device
                     )
-                else:
-                    Vcontent = None
                 
                 targets = torch.tensor(target_scores[batch_perm], device=device)
                 
-                # Forward pass
+                # Forward and backward passes
                 preds, _, _ = model(Uin, Vin, Ucontent, Vcontent)
                 loss = criterion(preds, targets)
                 
-                # Backward pass
                 optimizer.zero_grad()
                 loss.backward()
+                
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                
                 optimizer.step()
                 
                 epoch_loss += loss.item()
                 num_batches += 1
                 total_steps += 1
                 
-                if total_steps % 100 == 0:
-                    print(f"Step {total_steps}: Loss = {loss.item():.4f}")
+                # if total_steps % 100 == 0:
+                #     print(f"Step {total_steps}: Loss = {loss.item():.4f}")
         
-        # Step the scheduler after each epoch
+        # Step the scheduler
         scheduler.step()
         
         avg_epoch_loss = epoch_loss / max(num_batches, 1)
         print(f"Epoch {epoch+1}/{num_epochs}: Average Loss = {avg_epoch_loss:.4f}")
+        train_losses.append(avg_epoch_loss)
+        
+        # Evaluation phase
+        if (epoch + 1) % eval_every == 0:
+            model.eval()
+            print("\nRunning evaluation...")
+            
+            # Validation evaluation
+            if val_loader is not None:
+                val_ndcg = ndcg_calc_dropout_sampled(base_model, model, val_loader, ml_data, k_values =[15, 30], device=device)[0]
+                val_ndcgs.append(val_ndcg)
+                print(f"Validation NDCG@15: {val_ndcg}")
+            
+            model.train()
     
-    print("Training completed!")
+    # Plot training curves
+    # if len(val_ndcgs) > 0:
+    #     plt.figure(figsize=(10, 5))
+    #     plt.subplot(1, 2, 1)
+    #     plt.plot(train_losses, label='Train Loss')
+    #     plt.xlabel('Epoch')
+    #     plt.ylabel('Loss')
+    #     plt.title('Training Loss')
+    #     plt.legend()
+        
+    #     plt.subplot(1, 2, 2)
+    #     epochs = np.arange(0, num_epochs, eval_every)
+    #     plt.plot(epochs[:len(val_ndcgs)], val_ndcgs, label='Validation NDCG@10')
+    #     if len(test_ndcgs) > 0:
+    #         plt.plot(epochs[:len(test_ndcgs)], test_ndcgs, label='Test NDCG@10')
+    #     plt.xlabel('Epoch')
+    #     plt.ylabel('NDCG@10')
+    #     plt.title('Evaluation Metrics')
+    #     plt.legend()
+    #     plt.tight_layout()
+    #     plt.show()
+    
+    print("\nTraining completed!")
     return model
-
-
 

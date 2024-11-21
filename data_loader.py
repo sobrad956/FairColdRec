@@ -85,17 +85,17 @@ def load_movielens(data_path: str = 'MovieLens1M',
         train_valid_data, test_data = train_test_split(
             ratings,
             test_size=test_ratio,
-            shuffle=False  # Keep temporal ordering
+            shuffle=False
         )
         
         # Then split remaining data into train and validation
         train_data, valid_data = train_test_split(
             train_valid_data,
             test_size=valid_ratio/(1-test_ratio),
-            shuffle=False  # Keep temporal ordering
+            shuffle=False
         )
 
-    # Load and process content features as before...
+    # Load and process content features
     movies_file = Path(data_path) / 'movies.dat'
     movies = pd.read_csv(
         movies_file,

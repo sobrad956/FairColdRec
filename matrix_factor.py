@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 #local
-from evaluator import ndcg_calc_base
+from evaluator import ndcg_calc_base, ndcg_calc_sampled
 
 
 @dataclass
@@ -24,14 +24,14 @@ class BiasedMF(nn.Module):
                  reg = 0.0001):
         super().__init__()
         self.reg = reg
-        
+    
         # User components
-        self.user_embeddings = nn.Embedding(num_users, embedding_dim, sparse=True)
-        self.user_bias = nn.Embedding(num_users, 1, sparse=True)
+        self.user_embeddings = nn.Embedding(num_users, embedding_dim)
+        self.user_bias = nn.Embedding(num_users, 1)
         
         # Item components
-        self.item_embeddings = nn.Embedding(num_items, embedding_dim, sparse=True)
-        self.item_bias = nn.Embedding(num_items, 1, sparse=True)
+        self.item_embeddings = nn.Embedding(num_items, embedding_dim)
+        self.item_bias = nn.Embedding(num_items, 1)
         
         # Global bias
         self.global_bias = nn.Parameter(torch.zeros(1))
@@ -68,10 +68,10 @@ class BiasedMF(nn.Module):
         # Calculate regularization if in training
         if self.training:
             reg_loss = self.reg * (
-                (user_h**2).sum() +
-                (item_h**2).sum() +
-                (user_b**2).sum() +
-                (item_b**2).sum()
+                torch.norm(user_h) + 
+                torch.norm(item_h) + 
+                torch.norm(user_b) + 
+                torch.norm(item_b)
             )
         else:
             reg_loss = None
@@ -135,6 +135,12 @@ def train_mf(model,
     """
     model = model.to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+    # optimizer = torch.optim.Adam(
+    #     model.parameters(),
+    #     lr=lr,
+    #     weight_decay=0.0,  
+    #     betas=(0.9, 0.999)
+    # )
     train_losses = []
     ndcg_scores = []
     ndcg_test_scores = []
@@ -157,11 +163,11 @@ def train_mf(model,
             num_batches += 1
             
         #Calc NDCG on training set (monitor along with loss for sanity)
-        train_ndcg, train_prec, train_rec = ndcg_calc_base(model, train_loader, ml_data, k_values=[15,30], device=device)
+        train_ndcg, train_prec, train_rec, train_mdg, mdg_dic = ndcg_calc_base(model, train_loader, ml_data, k_values=[15,30], device=device)
         ndcg_scores.append(np.mean(train_ndcg))
         
         #Comment this out to speed up, leaving it to check now
-        test_ndcg, test_prec, test_rec = ndcg_calc_base(model, val_loader, ml_data, [15,30], device= device)
+        test_ndcg, test_prec, test_rec, _, _ = ndcg_calc_sampled(model, val_loader, ml_data, [15,30], device= device)
         ndcg_test_scores.append(np.mean(test_ndcg))
         
         avg_loss = total_loss / len(train_loader)
