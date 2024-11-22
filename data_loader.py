@@ -29,12 +29,13 @@ class MovieLensDataset(Dataset):
         self.users = torch.tensor(ratings['user_idx'].values, dtype=torch.long)
         self.items = torch.tensor(ratings['item_idx'].values, dtype=torch.long)
         self.ratings = torch.tensor(ratings['rating'].values, dtype=torch.float)
+        self.genders = torch.tensor(ratings['gender'].values, dtype=torch.int)
 
     def __len__(self) -> int:
         return len(self.ratings)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.users[idx], self.items[idx], self.ratings[idx]
+        return self.users[idx], self.items[idx], self.ratings[idx], self.genders[idx]
 
 
 def load_movielens(data_path: str = 'MovieLens1M',
@@ -60,6 +61,22 @@ def load_movielens(data_path: str = 'MovieLens1M',
         names=['user_id', 'movie_id', 'rating', 'timestamp'],
         engine='python'
     )
+
+    #Load users
+    users_file = Path(data_path) / 'users.dat'
+    df_users = pd.read_csv(
+      users_file,sep="::",
+      engine="python",
+      encoding='latin-1',
+      names=["user_id", "gender", "age", "occupation", "zip"]
+    )
+    gender_map = {'M': 0, 'F': 1}
+    df_users['gender_binary'] = df_users['gender'].map(gender_map)
+    df_users.drop(['age', 'occupation', 'zip', 'gender'], axis=1, inplace=True)
+
+    ratings = ratings.merge(df_users[['user_id', 'gender_binary']], on='user_id', how='left')
+    ratings.rename(columns={'gender_binary': 'gender'}, inplace=True)
+    
     
     # Create user and item mappings
     user2idx = {id_: idx for idx, id_ in enumerate(ratings['user_id'].unique())}
@@ -135,7 +152,8 @@ def load_movielens(data_path: str = 'MovieLens1M',
         n_items=len(item2idx),
         user2idx=user2idx,
         item2idx=item2idx,
-        item_content=item_content
+        item_content=item_content,
+        user_content=ratings['gender']
     )
 
 def cold_start_split(ratings: pd.DataFrame,
@@ -239,6 +257,9 @@ def prepare_ml_pipeline(data_path: str = 'MovieLens1M',
     """
     # Load and process data
     ml_data = load_movielens(data_path, cold_start=cold_start)
+    print(ml_data.train_data.head())
+    print('-------')
+    print(ml_data.test_data.head())
     
     # Create data loaders
     train_loader, valid_loader, test_loader = get_data_loaders(

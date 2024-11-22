@@ -109,6 +109,15 @@ class BiasedMF(nn.Module):
             self.user_embeddings.weight.detach(),
             self.item_embeddings.weight.detach()
         )
+    def get_all_embeddings(self):
+        """Get user and item embeddings"""
+        return (
+            self.user_embeddings.weight.detach(),
+            self.user_bias.weight.detach(),
+            self.item_embeddings.weight.detach(),
+            self.item_bias.weight.detach(),
+            self.global_bias,
+        )
 
 
 def train_mf(model,
@@ -150,7 +159,7 @@ def train_mf(model,
         total_loss = 0
         num_batches = 0
         
-        for user_ids, item_ids, ratings in train_loader:
+        for user_ids, item_ids, ratings, _ in train_loader:
             optimizer.zero_grad()
             # Move to device
             user_ids = user_ids.to(device)
@@ -167,14 +176,14 @@ def train_mf(model,
         ndcg_scores.append(np.mean(train_ndcg))
         
         #Comment this out to speed up, leaving it to check now
-        test_ndcg, test_prec, test_rec = ndcg_calc_sampled(model, val_loader, ml_data, [15,30], device= device)
-        ndcg_test_scores.append(np.mean(test_ndcg))
+        #test_ndcg, test_prec, test_rec = ndcg_calc_sampled(model, val_loader, ml_data, [15,30], device= device)
+        #ndcg_test_scores.append(np.mean(test_ndcg))
         
         avg_loss = total_loss / len(train_loader)
         train_losses.append(avg_loss)
         
         avg_loss = total_loss / num_batches
-        print(f"Epoch {epoch+1} - Avg Loss: {avg_loss:.4f} - Avg Train NDCG: {np.mean(train_ndcg):.4f} - Avg Test NDCG: {np.mean(test_ndcg):.4f}")
-        print(f"Epoch {epoch+1} - Avg Test Prec: {np.mean(test_prec):.4f} - Avg Test Rec: {np.mean(test_rec)}")
+        #print(f"Epoch {epoch+1} - Avg Loss: {avg_loss:.4f} - Avg Train NDCG: {np.mean(train_ndcg):.4f} - Avg Test NDCG: {np.mean(test_ndcg):.4f}")
+        #print(f"Epoch {epoch+1} - Avg Test Prec: {np.mean(test_prec):.4f} - Avg Test Rec: {np.mean(test_rec)}")
             
     return model
