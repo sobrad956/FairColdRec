@@ -163,11 +163,11 @@ def train_mf(model,
             num_batches += 1
             
         #Calc NDCG on training set (monitor along with loss for sanity)
-        train_ndcg, train_prec, train_rec, train_mdg, mdg_dic = ndcg_calc_base(model, train_loader, ml_data, k_values=[15,30], device=device)
+        train_ndcg = ndcg_calc_base(model, train_loader, ml_data, k_values=[15,30], device=device)
         ndcg_scores.append(np.mean(train_ndcg))
         
         #Comment this out to speed up, leaving it to check now
-        test_ndcg, test_prec, test_rec, _, _ = ndcg_calc_sampled(model, val_loader, ml_data, [15,30], device= device)
+        test_ndcg, test_prec, test_rec = ndcg_calc_sampled(model, val_loader, ml_data, [15,30], device= device)
         ndcg_test_scores.append(np.mean(test_ndcg))
         
         avg_loss = total_loss / len(train_loader)
@@ -175,6 +175,6 @@ def train_mf(model,
         
         avg_loss = total_loss / num_batches
         print(f"Epoch {epoch+1} - Avg Loss: {avg_loss:.4f} - Avg Train NDCG: {np.mean(train_ndcg):.4f} - Avg Test NDCG: {np.mean(test_ndcg):.4f}")
-        print(f"Epoch {epoch+1} - Train Precision: {np.mean(train_prec):.4f} - Train Recall: {np.mean(train_rec):.4f} - Avg Test Prec: {np.mean(test_prec):.4f} - Avg Tet Rec: {np.mean(test_rec)}")
+        print(f"Epoch {epoch+1} - Avg Test Prec: {np.mean(test_prec):.4f} - Avg Test Rec: {np.mean(test_rec)}")
             
     return model

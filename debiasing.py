@@ -141,12 +141,7 @@ def preprocess_ratings(R: torch.Tensor,
                       mask: torch.Tensor,
                       item_warm: np.ndarray,
                       alpha: float) -> torch.Tensor:
-    """Preprocess ratings"""
-    # Print shapes for debugging
-    print(f"R shape: {R.shape}")
-    print(f"mask shape: {mask.shape}")
-    print(f"item_warm shape: {item_warm.shape}, max index: {item_warm.max()}")
-    
+    """Preprocess ratings""" 
     # Ensure working with float tensors
     R = R.float()
     mask = mask.float()
@@ -203,121 +198,6 @@ def preprocess_ratings(R: torch.Tensor,
     
     return R_output
 
-# def train_debiasing_model(base_model: Union[BiasedMF, DeepCF],
-#                          ml_data: MovieLensData,
-#                          model_select: List[int] = [100],
-#                          alpha: float = 4.0,
-#                          batch_size: int = 50,
-#                          num_epochs: int = 100,
-#                          reg: float = 1e-5,
-#                          device: str = 'cuda' if torch.cuda.is_available() else 'cpu') -> DebiasingModel:
-#     """Train debiasing model with proper dimension handling"""
-    
-#     print("Initializing debiasing model training...")
-#     print(f"Number of users: {ml_data.n_users}")
-#     print(f"Number of items: {ml_data.n_items}")
-    
-#     with torch.no_grad():
-#         if isinstance(base_model, BiasedMF):
-#             u_emb, i_emb = base_model.get_embeddings()
-#             R = torch.mm(i_emb, u_emb.t())
-#         elif isinstance(base_model, DeepCF):
-#             # For DropoutNet, use the encoded embeddings
-#             # Create dummy inputs to get embeddings
-#             u_dummy = torch.zeros((ml_data.n_users, base_model.rank_in)).to(device)
-#             i_dummy = torch.zeros((ml_data.n_items, base_model.rank_in)).to(device)
-            
-#             u_content = (torch.tensor(ml_data.user_content.todense(), dtype=torch.float32).to(device) 
-#                         if ml_data.user_content is not None else None)
-#             #i_content = (torch.tensor(ml_data.item_content.todense(), dtype=torch.float32).to(device)
-#             i_content = (torch.tensor(ml_data.item_content, dtype=torch.float32).to(device)  
-#                         if ml_data.item_content is not None else None)
-            
-#             # Get encoded embeddings
-#             u_emb, i_emb = base_model.encode(u_dummy, i_dummy, u_content, i_content)
-#             # Calculate rating matrix
-#             R = torch.mm(i_emb, u_emb.t())
-        
-        
-#         print(f"Generated rating matrix shape: {R.shape}")
-    
-#     # Create mask matrix with proper dimensions
-#     mask = torch.zeros((R.shape[0], R.shape[1]), device=device)
-#     print(f"Created mask matrix with shape: {mask.shape}")
-    
-#     # Create rating matrix from training data
-#     print("Creating rating matrix from training data...")
-#     valid_entries = 0
-#     for _, row in ml_data.train_data.iterrows():
-#         item_idx = row['item_idx']
-#         user_idx = row['user_idx']
-#         if item_idx < R.shape[0] and user_idx < R.shape[1]:
-#             mask[item_idx, user_idx] = 1
-#             valid_entries += 1
-#     print(f"Filled mask matrix with {valid_entries} valid entries")
-    
-#     # Get warm items (items with training data)
-#     item_warm = ml_data.train_data['item_idx'].unique()
-#     valid_warm = item_warm[item_warm < R.shape[0]]
-#     print(f"Number of warm items (before filtering): {len(item_warm)}")
-#     print(f"Number of valid warm items: {len(valid_warm)}")
-    
-#     # Preprocess ratings
-#     print("Preprocessing ratings...")
-#     R_target = preprocess_ratings(R, mask, valid_warm, alpha)
-    
-#     # Create dataset and dataloader
-#     dataset = RecommendationDataset(R, R_target, valid_warm)
-#     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    
-#     # Initialize debiasing model
-#     print("Initializing debiasing model...")
-#     debiasing_model = DebiasingModel(
-#         model_select=model_select,
-#         num_user=R.shape[1],
-#         num_item=R.shape[0],
-#         reg=reg
-#     ).to(device)
-    
-#     # Initialize optimizer
-#     optimizer = torch.optim.Adam(debiasing_model.parameters(), lr=0.001)
-#     scheduler = StepLR(optimizer, step_size=5, gamma=0.9)
-    
-#     print("\nStarting training...")
-#     for epoch in range(num_epochs):
-#         total_loss = 0
-#         total_reg_loss = 0
-#         total_recon_loss = 0
-#         num_batches = 0
-        
-#         for R_batch, R_target_batch in train_loader:
-#             R_batch = R_batch.to(device)
-#             R_target_batch = R_target_batch.to(device)
-            
-#             output = debiasing_model.train_step(R_batch, R_target_batch, optimizer)
-            
-#             if output.loss_all is not None:
-#                 total_loss += output.loss_all.item()
-#             if output.reg_loss is not None:
-#                 total_reg_loss += output.reg_loss.item()
-#             if output.loss_r is not None:
-#                 total_recon_loss += output.loss_r.item()
-                
-#             num_batches += 1
-        
-#         scheduler.step()
-        
-#         if (epoch + 1) % 5 == 0:
-#             avg_loss = total_loss / num_batches
-#             avg_reg_loss = total_reg_loss / num_batches
-#             avg_recon_loss = total_recon_loss / num_batches
-#             print(f'Epoch {epoch+1}/{num_epochs}:')
-#             print(f'  Average Loss: {avg_loss:.4f}')
-#             print(f'  Average Reg Loss: {avg_reg_loss:.4f}')
-#             print(f'  Average Recon Loss: {avg_recon_loss:.4f}')
-    
-#     print("\nTraining completed!")
-#     return debiasing_model
 def train_debiasing_model(base_model,
                          original_mf,  # Added to access bias terms when using DropoutNet
                          ml_data,
@@ -394,10 +274,8 @@ def train_debiasing_model(base_model,
     
     # Create mask matrix with proper dimensions
     mask = torch.zeros((R.shape[0], R.shape[1]), device=device)
-    print(f"Created mask matrix with shape: {mask.shape}")
     
     # Create rating matrix from training data
-    print("Creating rating matrix from training data...")
     valid_entries = 0
     for _, row in ml_data.train_data.iterrows():
         item_idx = row['item_idx']
@@ -405,7 +283,7 @@ def train_debiasing_model(base_model,
         if item_idx < R.shape[0] and user_idx < R.shape[1]:
             mask[item_idx, user_idx] = 1
             valid_entries += 1
-    print(f"Filled mask matrix with {valid_entries} valid entries")
+    
     
     # Get warm items (items with training data)
     item_warm = ml_data.train_data['item_idx'].unique()
@@ -430,7 +308,7 @@ def train_debiasing_model(base_model,
     ).to(device)
     
     # Initialize optimizer
-    optimizer = torch.optim.Adam(debiasing_model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(debiasing_model.parameters(), lr=0.005)
     scheduler = StepLR(optimizer, step_size=5, gamma=0.9)
     
     print("\nStarting training...")
