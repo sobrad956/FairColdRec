@@ -243,7 +243,7 @@ def train_debiasing_model(base_model,
             
         else:  # DropoutNet
             # Get base embeddings from original MF for DropoutNet input
-            u_emb, i_emb = original_mf.get_embeddings()
+            u_emb, i_emb, _, _, _ = original_mf.get_embeddings()
             u_emb = u_emb.to(device)
             i_emb = i_emb.to(device)
             

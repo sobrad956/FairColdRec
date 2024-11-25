@@ -74,6 +74,7 @@ class DeepCF(nn.Module):
 
     def __init__(self, latent_rank_in, user_content_rank, item_content_rank, model_select, rank_out):
         super(DeepCF, self).__init__()
+        #self.ml_data.user_content = None
         self.rank_in = latent_rank_in
         self.phi_u_dim = user_content_rank
         self.phi_v_dim = item_content_rank
@@ -166,6 +167,8 @@ class DeepCF(nn.Module):
                 Ucontent= eval_data.U_content_test[eval_start:eval_stop, :]
             else:
                 Ucontent = None
+
+            Ucontent = None #FLAG
 
             Uin = torch.tensor(Uin)
             Vin = torch.tensor(Vin)
@@ -487,7 +490,7 @@ def train_dropoutnet(ml_data,
     
     # Get base embeddings
     with torch.no_grad():
-        u_emb, i_emb = base_model.get_embeddings()
+        u_emb, i_emb, _, _, _ = base_model.get_embeddings()
         u_emb = u_emb.float()
         i_emb = i_emb.float()
         
@@ -500,7 +503,7 @@ def train_dropoutnet(ml_data,
     # Initialize model
     model = get_model(
         latent_rank_in=u_emb.shape[1],
-        user_content_rank=ml_data.user_content.shape[1] if ml_data.user_content is not None else 0,
+        user_content_rank= 0, #ml_data.user_content.shape[1] if ml_data.user_content is not None else 0,
         item_content_rank=ml_data.item_content.shape[1] if ml_data.item_content is not None else 0,
         model_select=model_select,
         rank_out=rank_out
@@ -592,12 +595,12 @@ def train_dropoutnet(ml_data,
                 
                 Ucontent = None
                 Vcontent = None
-                if ml_data.user_content is not None:
-                    Ucontent = torch.tensor(
-                        ml_data.user_content[batch_users],
-                        dtype=torch.float32,
-                        device=device
-                    )
+                # if ml_data.user_content is not None:
+                #     Ucontent = torch.tensor(
+                #         ml_data.user_content[batch_users],
+                #         dtype=torch.float32,
+                #         device=device
+                #     )
                 if ml_data.item_content is not None:
                     Vcontent = torch.tensor(
                         ml_data.item_content[batch_items],

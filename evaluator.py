@@ -678,7 +678,7 @@ def ndcg_calc_dropout_sampled(base_model,
     
     # Get base embeddings once
     with torch.no_grad():
-        u_emb, i_emb = base_model.get_embeddings()
+        u_emb, i_emb, user_biases, item_biases, global_bias = base_model.get_embeddings()
         u_emb = u_emb.to(device)
         i_emb = i_emb.to(device)
     
@@ -729,9 +729,12 @@ def ndcg_calc_dropout_sampled(base_model,
                 preds = torch.mm(i_encoded, u_encoded.t()).squeeze()
                 
                 # Add bias terms
-                user_bias = base_model.user_bias(torch.tensor([user_id], device=device)).squeeze()
-                item_biases = base_model.item_bias(torch.tensor(eval_items, device=device)).squeeze()
-                preds = preds + user_bias + item_biases + base_model.global_bias
+                #user_bias = base_model.user_bias(torch.tensor([user_id], device=device)).squeeze()
+                #item_biases = base_model.item_bias(torch.tensor(eval_items, device=device)).squeeze()
+                #preds = preds + user_bias + item_biases + base_model.global_bias
+                user_bias = user_biases[user_id]
+                print(f'user bias {user_bias.shape}')
+                preds = preds + user_bias + item_biases + global_bias
                 
                 # Create true ratings vector
                 true_ratings = np.zeros(len(eval_items))
@@ -741,6 +744,10 @@ def ndcg_calc_dropout_sampled(base_model,
                         true_ratings[idx] = 1 if rating >= 4 else 0
                 
                 if len(eval_items) >= 2:
+                    print('true ratings')
+                    print(true_ratings.shape)
+                    print('preds')
+                    print(preds.cpu().numpy().shape)
                     ndcg = ndcg_score(
                         y_true=true_ratings.reshape(1, -1),
                         y_score=preds.cpu().numpy().reshape(1, -1),
@@ -806,7 +813,7 @@ def ndcg_calc_debiased_sampled(prior_model,
     with torch.no_grad():
         # Get base predictions with correct model combination
         if model_type == 0:  # Matrix Factorization
-            u_emb, i_emb = prior_model.get_embeddings()
+            u_emb, i_emb, user_biases, item_biases, global_bias = prior_model.get_embeddings()
             u_emb = u_emb.to(device)
             i_emb = i_emb.to(device)
             R = torch.mm(i_emb, u_emb.t())
@@ -839,9 +846,13 @@ def ndcg_calc_debiased_sampled(prior_model,
             # Add bias terms from original MF
             all_users = torch.arange(ml_data.n_users, device=device)
             all_items_tensor = torch.arange(ml_data.n_items, device=device)
-            user_biases = original_mf.user_bias(all_users).squeeze()
-            item_biases = original_mf.item_bias(all_items_tensor).squeeze()
-            R += user_biases.unsqueeze(0) + item_biases.unsqueeze(1) + original_mf.global_bias
+            #user_biases = original_mf.user_bias(all_users).squeeze()
+            #item_biases = original_mf.item_bias(all_items_tensor).squeeze()
+            #R += user_biases.unsqueeze(0) + item_biases.unsqueeze(1) + original_mf.global_bias
+
+            R += user_biases + item_biases + global_bias
+
+
         
         # Apply debiasing
         R = model(R, is_training=False).preds

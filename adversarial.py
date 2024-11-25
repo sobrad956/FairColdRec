@@ -33,10 +33,14 @@ def weights_init(m):
             nn.init.constant_(m.bias, 0)  # Initialize biases to zero
 
 class Filter(nn.Module):
-    def __init__(self, user_embed, embedding_in_dim, batch_size = 1024, embedding_out_dim=100):
+    def __init__(self, user_embed, embedding_in_dim, item_embedding, user_bias, item_bias, global_bias, batch_size = 1024, embedding_out_dim=100):
         super(Filter, self).__init__()
 
         self.filtered_user_embeddings = user_embed
+        self.item_embedding = item_embedding
+        self.user_bias = user_bias
+        self.item_bias = item_bias
+        self.global_bias = global_bias
         #self.filtered_user_embeddings = nn.Embedding(embedding_in_dim, embedding_out_dim)
 
         self.filter = nn.Sequential(
@@ -52,14 +56,18 @@ class Filter(nn.Module):
 
     def get_embeddings(self):
         return (
-            self.filtered_user_embeddings
+            self.filtered_user_embeddings,
+            self.item_embedding,
+            self.user_bias,
+            self.item_bias,
+            self.global_bias
         )
 
 class Discriminator(nn.Module):
     def __init__(self, user_embeddings, user_bias, item_embeddings, item_bias, global_bias, embedding_size=100):
         super(Discriminator, self).__init__()
 
-        self.filtered_user_embeddings = user_embeddings.get_embeddings()
+        self.filtered_user_embeddings, _, _, _, _ = user_embeddings.get_embeddings()
         self.item_embeddings = item_embeddings
         self.user_bias = user_bias
         self.item_bias = item_bias
@@ -79,7 +87,7 @@ class Discriminator(nn.Module):
         self.apply(weights_init)
     
     def forward(self, x, y, user_embeddings):
-        self.filtered_user_embeddings = user_embeddings.get_embeddings()
+        self.filtered_user_embeddings, _, _, _, _ = user_embeddings.get_embeddings()
         embed = self.filtered_user_embeddings[x]
         hidden = self.hidden_layers(embed)
         binary_pred = self.binary_output(hidden)  # Predict sensitive class
