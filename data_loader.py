@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
-from typing import Tuple, Dict, Optional
+from typing import Tuple, Dict, Optional, List
 from sklearn.model_selection import train_test_split
 import scipy.sparse
 from dataclasses import dataclass
@@ -21,6 +21,8 @@ class MovieLensData:
     item2idx: Dict[int, int]
     item_content: Optional[np.ndarray] = None  # For genres
     user_content: Optional[np.ndarray] = None  # For demographics
+    user_feature_maps: Optional[Dict[str, Dict[str, int]]] = None  # Maps feature names to their column indices
+    user_feature_names: Optional[List[str]] = None  # Names of all user features in order
 
 
 class MovieLensDataset(Dataset):
@@ -70,7 +72,6 @@ def load_movielens(data_path: str = 'MovieLens1M',
     ratings['item_idx'] = ratings['movie_id'].map(item2idx)
     
     if cold_start:
-        # Implement cold-start splitting
         train_data, valid_data, test_data = cold_start_split(
             ratings,
             valid_ratio=valid_ratio,
@@ -78,17 +79,12 @@ def load_movielens(data_path: str = 'MovieLens1M',
             random_state=random_state
         )
     else:
-        # Original temporal splitting
         ratings = ratings.sort_values('timestamp')
-        
-        # First split off test set
         train_valid_data, test_data = train_test_split(
             ratings,
             test_size=test_ratio,
             shuffle=False
         )
-        
-        # Then split remaining data into train and validation
         train_data, valid_data = train_test_split(
             train_valid_data,
             test_size=valid_ratio/(1-test_ratio),
@@ -113,6 +109,57 @@ def load_movielens(data_path: str = 'MovieLens1M',
             idx = item2idx[movie_id]
             item_content[idx] = genres.loc[movies['movie_id'] == movie_id].values
 
+    # Load and process user features
+    users_file = Path(data_path) / 'users.dat'
+    users = pd.read_csv(
+        users_file,
+        sep='::',
+        names=['user_id', 'gender', 'age', 'occupation', 'zip_code'],
+        engine='python',
+        encoding='latin-1'
+    )
+    
+    # Process user features into one-hot encoding
+    gender_dummy = pd.get_dummies(users['gender'], prefix='gender')
+    age_dummy = pd.get_dummies(users['age'], prefix='age')
+    occupation_dummy = pd.get_dummies(users['occupation'], prefix='occupation')
+    
+    # Combine all user features
+    user_features = pd.concat([gender_dummy, age_dummy, occupation_dummy], axis=1)
+    
+    # Create feature maps to track what each column represents
+    feature_start_idx = 0
+    user_feature_maps = {
+        'gender': {},
+        'age': {},
+        'occupation': {}
+    }
+    
+    # Map gender columns
+    for col in gender_dummy.columns:
+        user_feature_maps['gender'][col.replace('gender_', '')] = feature_start_idx
+        feature_start_idx += 1
+    
+    # Map age columns
+    for col in age_dummy.columns:
+        user_feature_maps['age'][col.replace('age_', '')] = feature_start_idx
+        feature_start_idx += 1
+    
+    # Map occupation columns
+    for col in occupation_dummy.columns:
+        user_feature_maps['occupation'][col.replace('occupation_', '')] = feature_start_idx
+        feature_start_idx += 1
+    
+    # Store feature names in order
+    user_feature_names = list(user_features.columns)
+    
+    # Create user content matrix
+    user_content = np.zeros((len(user2idx), len(user_features.columns)))
+    for user_id in users['user_id']:
+        if user_id in user2idx:
+            idx = user2idx[user_id]
+            user_content[idx] = user_features.loc[users['user_id'] == user_id].values
+
     # Print dataset statistics
     print(f"Dataset loaded with cold_start={cold_start}:")
     print(f"Train: {len(train_data)} interactions")
@@ -135,7 +182,10 @@ def load_movielens(data_path: str = 'MovieLens1M',
         n_items=len(item2idx),
         user2idx=user2idx,
         item2idx=item2idx,
-        item_content=item_content
+        item_content=item_content,
+        user_content=user_content,
+        user_feature_maps=user_feature_maps,
+        user_feature_names=user_feature_names
     )
 
 def cold_start_split(ratings: pd.DataFrame,
@@ -246,3 +296,9 @@ def prepare_ml_pipeline(data_path: str = 'MovieLens1M',
     )
     
     return ml_data, train_loader, valid_loader, test_loader
+
+def get_user_gender(ml_data):
+    gender_cols = ml_data.user_feature_maps['gender']
+    gender_start = gender_cols['F']
+    gender_encoding = ml_data.user_content[user_idx, gender_start:gender_start + len(gender_cols)]
+    return 'F' if gender_encoding[0] == 1 else 'M'
