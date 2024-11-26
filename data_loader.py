@@ -297,7 +297,7 @@ def prepare_ml_pipeline(data_path: str = 'MovieLens1M',
     
     return ml_data, train_loader, valid_loader, test_loader
 
-def get_user_gender(ml_data):
+def get_user_gender(ml_data, user_idx):
     gender_cols = ml_data.user_feature_maps['gender']
     gender_start = gender_cols['F']
     gender_encoding = ml_data.user_content[user_idx, gender_start:gender_start + len(gender_cols)]
