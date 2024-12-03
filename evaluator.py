@@ -51,82 +51,81 @@ def analyze_mdg_percentiles(mdg_scores, percentiles = [10, 20, 90]):
     
     return results
 
-
-def mdg_calc_base(model, data_loader, ml_data, device = 'cpu'):
-    
+def mdg_calc_base(model, data_loader, ml_data, k=100, device='cpu'):
+    """Calculate MDG using only test set items"""
     user_ratings = defaultdict(list)
     item_users = defaultdict(list)
     mdg_scores = defaultdict(list)
     
+    # Group ratings by user
     for batch_triplet in data_loader:
         for i in range(len(batch_triplet[0])):
             user_id, item_id, rating = batch_triplet[0][i], batch_triplet[1][i], batch_triplet[2][i]
             user_ratings[user_id.item()].append((item_id.item(), rating.item()))
             if rating.item() > 0:
                 item_users[item_id.item()].append(user_id.item())
-                
+    
     model.eval()
-    all_items = torch.arange(ml_data.n_items, device=device)
     
     with torch.no_grad():
-
         for user_id, item_ratings in user_ratings.items():
-            # Get predictions for ALL items
-            user_tensor = torch.full((ml_data.n_items,), user_id, dtype=torch.long).to(device)
-            preds = model(user_tensor, all_items).preds.cpu().numpy()
+            # Get only test items for this user
+            test_items = torch.tensor([item[0] for item in item_ratings]).to(device)
+            user_tensor = torch.full((len(test_items),), user_id, dtype=torch.long).to(device)
             
-            #Calculate rankings for MDG
+            # Predict only test items
+            preds = model(user_tensor, test_items).preds.cpu().numpy()
+            
+            # Calculate rankings
             sorted_indices = np.argsort(-preds)
-            rankings = {item_id: rank + 1 for rank, item_id in enumerate(sorted_indices)}
+            rankings = {test_items[idx].item(): rank + 1 for rank, idx in enumerate(sorted_indices)}
             
-            #update MDG scores
+            # Update MDG scores
             for item_id, rating in item_ratings:
                 if rating > 0:
                     rank = rankings[item_id]
-                    if rank <= 100:
+                    if rank <= k:
                         mdg_scores[item_id].append(1.0 / np.log2(1 + rank))
                     else:
                         mdg_scores[item_id].append(0)
-        
-    #calculate final MDG scores
+    
+    # Calculate final MDG scores
     final_mdg = {}
     for item_id, gains in mdg_scores.items():
         matched_users = len(item_users[item_id])
         if matched_users > 0:
             final_mdg[item_id] = sum(gains) / matched_users
     
-    #analyze mdg percentiles
     mdg_analysis = analyze_mdg_percentiles(final_mdg)
     return final_mdg, mdg_analysis
 
 def mdg_calc_dropout(model, 
-                    base_model, 
+                    base_model,
                     data_loader, 
-                    ml_data, 
-                    k = 100,
-                    device= 'cpu'):
-
-    # Initialize tracking dictionaries
+                    ml_data,
+                    k=100,
+                    total_eval_items=200, 
+                    device='cpu'):
+    """Calculate MDG for dropout model using test items and sampled negatives"""
     user_ratings = defaultdict(list)
     item_users = defaultdict(list)
     mdg_scores = defaultdict(list)
+    all_items = set(range(ml_data.n_items))
     
-    # Collect user-item interactions
+    # Group test ratings
     for batch_triplet in data_loader:
         for i in range(len(batch_triplet[0])):
             user_id = batch_triplet[0][i].item()
             item_id = batch_triplet[1][i].item()
             rating = batch_triplet[2][i].item()
-            
             user_ratings[user_id].append((item_id, rating))
             if rating > 0:
                 item_users[item_id].append(user_id)
     
-    # Set models to evaluation mode
     model.eval()
     base_model.eval()
     
-    # Get base embeddings and prepare content features
+    # Get base embeddings once
     with torch.no_grad():
         u_emb, i_emb = base_model.get_embeddings()
         u_emb = u_emb.to(device)
@@ -140,35 +139,50 @@ def mdg_calc_dropout(model,
         if ml_data.item_content is not None:
             i_content = torch.tensor(ml_data.item_content, dtype=torch.float32).to(device)
         
-        # Calculate rankings and MDG scores
-        for user_id, item_ratings in tqdm(user_ratings.items(), desc="Calculating MDG"):
-            # Get user embeddings and calculate predictions
+        for user_id, item_ratings in user_ratings.items():
+            # Get test items and sample negatives
+            test_items = set(item[0] for item in item_ratings)
+            n_test = len(test_items)
+            n_neg = max(0, total_eval_items - n_test)
+            
+            available_neg = list(all_items - test_items)
+            if n_neg > 0 and available_neg:
+                n_neg = min(n_neg, len(available_neg))
+                neg_items = set(np.random.choice(available_neg, n_neg, replace=False))
+            else:
+                neg_items = set()
+            
+            eval_items = list(test_items | neg_items)
+            
+            # Get user embedding and encode
             user_emb = u_emb[user_id:user_id+1]
+            items_emb = i_emb[eval_items]
+            
             u_encoded, i_encoded = model.encode(
                 user_emb,
-                i_emb,
+                items_emb,
                 u_content[user_id:user_id+1] if u_content is not None else None,
-                i_content
+                i_content[eval_items] if i_content is not None else None
             )
             
-            # Calculate final predictions with bias terms
+            # Calculate predictions with bias terms
             dot_products = torch.mm(i_encoded, u_encoded.t()).squeeze()
             user_bias = base_model.user_bias(torch.tensor([user_id], device=device)).squeeze()
-            item_biases = base_model.item_bias(torch.arange(ml_data.n_items, device=device)).squeeze()
+            item_biases = base_model.item_bias(torch.tensor(eval_items, device=device)).squeeze()
             pred_ratings = dot_products + user_bias + item_biases + base_model.global_bias
             
             # Get rankings
-            sorted_indices = np.argsort(-pred_ratings.cpu().numpy())
-            rankings = {item_id: rank + 1 for rank, item_id in enumerate(sorted_indices)}
+            sorted_indices = torch.argsort(pred_ratings, descending=True).cpu().numpy()
+            rankings = {eval_items[idx]: rank + 1 for rank, idx in enumerate(sorted_indices)}
             
             # Calculate MDG for positive items
-            positive_items = [(item_id, rating) for item_id, rating in item_ratings if rating > 0]
-            for item_id, _ in positive_items:
-                rank = rankings[item_id]
-                if rank <= k:
-                    mdg_scores[item_id].append(1.0 / np.log2(1 + rank))
-                else:
-                    mdg_scores[item_id].append(0)
+            for item_id, rating in item_ratings:
+                if rating > 0:
+                    rank = rankings[item_id]
+                    if rank <= k:
+                        mdg_scores[item_id].append(1.0 / np.log2(1 + rank))
+                    else:
+                        mdg_scores[item_id].append(0)
     
     # Calculate final MDG scores
     final_mdg = {}
@@ -177,27 +191,25 @@ def mdg_calc_dropout(model,
         if n_users > 0:
             final_mdg[item_id] = sum(gains) / n_users
     
-    # Analyze MDG distribution
     mdg_analysis = analyze_mdg_percentiles(final_mdg)
-    
     return final_mdg, mdg_analysis
-  
 
 def mdg_calc_debiased(prior_model,
                      original_mf,
                      debiasing_model,
                      data_loader,
                      ml_data,
-                     model_type: int = 1,  # 0 for MF, 1 for DropoutNet
-                     k: int = 100,
-                     device: str = 'cpu'):
-  
-    # Initialize tracking dictionaries
+                     model_type=1,  # 0 for MF, 1 for DropoutNet
+                     k=100,
+                     total_eval_items=200,
+                     device='cpu'):
+    """Calculate MDG for debiased model using test items and sampled negatives"""
     user_ratings = defaultdict(list)
     item_users = defaultdict(list)
     mdg_scores = defaultdict(list)
+    all_items = set(range(ml_data.n_items))
     
-    # Collect user-item interactions
+    # Group ratings
     for batch_triplet in data_loader:
         for i in range(len(batch_triplet[0])):
             user_id = batch_triplet[0][i].item()
@@ -207,75 +219,80 @@ def mdg_calc_debiased(prior_model,
             if rating > 0:
                 item_users[item_id].append(user_id)
     
-    # Set models to evaluation mode
     prior_model.eval()
     debiasing_model.eval()
     if model_type == 1:
         original_mf.eval()
-        
+    
     with torch.no_grad():
         # Get base predictions with correct model combination
         if model_type == 0:  # Matrix Factorization
             u_emb, i_emb = prior_model.get_embeddings()
             u_emb = u_emb.to(device)
             i_emb = i_emb.to(device)
-            R_base = torch.mm(i_emb, u_emb.t())
+            R = torch.mm(i_emb, u_emb.t())
             
-            # Add bias terms from same model
             all_users = torch.arange(ml_data.n_users, device=device)
-            all_items = torch.arange(ml_data.n_items, device=device)
+            all_items_tensor = torch.arange(ml_data.n_items, device=device)
             user_biases = prior_model.user_bias(all_users).squeeze()
-            item_biases = prior_model.item_bias(all_items).squeeze()
-            R = R_base + user_biases.unsqueeze(0) + item_biases.unsqueeze(1) + prior_model.global_bias
+            item_biases = prior_model.item_bias(all_items_tensor).squeeze()
+            R += user_biases.unsqueeze(0) + item_biases.unsqueeze(1) + prior_model.global_bias
             
         else:  # DropoutNet
-            # Get base embeddings from original MF
             u_emb, i_emb = original_mf.get_embeddings()
             u_emb = u_emb.to(device)
             i_emb = i_emb.to(device)
             
-            # Get content features if needed
             u_content = (torch.tensor(ml_data.user_content, dtype=torch.float32).to(device) 
                         if ml_data.user_content is not None else None)
             i_content = (torch.tensor(ml_data.item_content, dtype=torch.float32).to(device)
                         if ml_data.item_content is not None else None)
             
-            # Get transformed embeddings from DropoutNet
             u_encoded, i_encoded = prior_model.encode(
                 u_emb,
                 i_emb,
                 u_content,
                 i_content
             )
-            R_base = torch.mm(i_encoded, u_encoded.t())
+            R = torch.mm(i_encoded, u_encoded.t())
             
-            # Add bias terms from original MF
             all_users = torch.arange(ml_data.n_users, device=device)
-            all_items = torch.arange(ml_data.n_items, device=device)
+            all_items_tensor = torch.arange(ml_data.n_items, device=device)
             user_biases = original_mf.user_bias(all_users).squeeze()
-            item_biases = original_mf.item_bias(all_items).squeeze()
-            R = R_base + user_biases.unsqueeze(0) + item_biases.unsqueeze(1) + original_mf.global_bias
+            item_biases = original_mf.item_bias(all_items_tensor).squeeze()
+            R += user_biases.unsqueeze(0) + item_biases.unsqueeze(1) + original_mf.global_bias
         
         # Apply debiasing
         R = debiasing_model(R, is_training=False).preds
         
-        # Calculate rankings and MDG scores
-        for user_id, item_ratings in tqdm(user_ratings.items(), desc="Calculating MDG"):
-            # Get predictions for this user
-            pred_ratings = R[:, user_id]
+        for user_id, item_ratings in user_ratings.items():
+            # Get test items and sample negatives
+            test_items = set(item[0] for item in item_ratings)
+            n_test = len(test_items)
+            n_neg = max(0, total_eval_items - n_test)
             
-            # Get rankings
-            sorted_indices = torch.argsort(pred_ratings, descending=True).cpu().numpy()
-            rankings = {item_id: rank + 1 for rank, item_id in enumerate(sorted_indices)}
+            available_neg = list(all_items - test_items)
+            if n_neg > 0 and available_neg:
+                n_neg = min(n_neg, len(available_neg))
+                neg_items = set(np.random.choice(available_neg, n_neg, replace=False))
+            else:
+                neg_items = set()
+            
+            eval_items = list(test_items | neg_items)
+            
+            # Get predictions and rankings
+            preds = R[eval_items, user_id]
+            sorted_indices = torch.argsort(preds, descending=True).cpu().numpy()
+            rankings = {eval_items[idx]: rank + 1 for rank, idx in enumerate(sorted_indices)}
             
             # Calculate MDG for positive items
-            positive_items = [(item_id, rating) for item_id, rating in item_ratings if rating > 0]
-            for item_id, _ in positive_items:
-                rank = rankings[item_id]
-                if rank <= k:
-                    mdg_scores[item_id].append(1.0 / np.log2(1 + rank))
-                else:
-                    mdg_scores[item_id].append(0)
+            for item_id, rating in item_ratings:
+                if rating > 0:
+                    rank = rankings[item_id]
+                    if rank <= k:
+                        mdg_scores[item_id].append(1.0 / np.log2(1 + rank))
+                    else:
+                        mdg_scores[item_id].append(0)
     
     # Calculate final MDG scores
     final_mdg = {}
@@ -284,13 +301,8 @@ def mdg_calc_debiased(prior_model,
         if n_users > 0:
             final_mdg[item_id] = sum(gains) / n_users
     
-    # Analyze MDG distribution
     mdg_analysis = analyze_mdg_percentiles(final_mdg)
-    
     return final_mdg, mdg_analysis
-
-
-
     
 def ndcg_calc_base(model, data_loader, ml_data, k_values=[5, 10, 20, 50], device='cpu'):
     """Calculate NDCG using only test set items"""

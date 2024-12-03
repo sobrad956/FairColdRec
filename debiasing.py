@@ -8,7 +8,6 @@ from typing import List, Optional, Union, Dict
 from dataclasses import dataclass
 from data_loader import MovieLensData
 from matrix_factor import BiasedMF
-#from heater import Heater
 from dropoutnet import DeepCF
 
 @dataclass
